@@ -5,20 +5,20 @@ import pytesseract
 import pyautogui
 import time
 import os
+import threading
+from collections import Counter
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QPushButton, QLabel, QVBoxLayout,
-    QHBoxLayout, QListWidget, QLineEdit, QMessageBox, QListWidgetItem,
-    QSpinBox, QCheckBox, QDialog
+    QHBoxLayout, QListWidget, QLineEdit, QMessageBox, QSpinBox, QCheckBox, QDialog
 )
-from PyQt5.QtCore import Qt, QRect
+from PyQt5.QtCore import Qt, QRect, pyqtSignal
 from PyQt5.QtGui import QGuiApplication, QPainter, QColor, QPen
-from PIL import ImageGrab
+from PIL import ImageGrab, ImageOps, Image
 
 
 # ================== CONFIGURAÇÕES ==================
 
-# Caminho para o Tesseract
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 os.environ['TESSDATA_PREFIX'] = r"C:\Program Files\Tesseract-OCR\tessdata"
 
@@ -26,6 +26,8 @@ os.environ['TESSDATA_PREFIX'] = r"C:\Program Files\Tesseract-OCR\tessdata"
 # ================== CLASSE PRINCIPAL ==================
 
 class OverLordApp(QWidget):
+    stop_signal = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Macro OverLord - PyQt5")
@@ -35,10 +37,11 @@ class OverLordApp(QWidget):
         self.tempo_entre_reproducoes = 1.5
         self.coordenadas_regiao = None
         self.condicoes_lista = []
-
         self.botao_reproduzir = None
         self.botao_manter_status = None
         self.botao_adicionar_status = None
+        self.thread_macro = None
+        self.stop_macro = False
 
         self.init_ui()
 
@@ -95,10 +98,20 @@ class OverLordApp(QWidget):
         self.preview_checkbox = QCheckBox("Modo Preview (executa OCR e para)")
         main_layout.addWidget(self.preview_checkbox)
 
-        # ---- Botão de Iniciar ----
+        # ---- Botões de Controle ----
+        control_layout = QHBoxLayout()
+
         self.btn_start = QPushButton("▶️ Iniciar Macro")
         self.btn_start.clicked.connect(self.iniciar_macro)
-        main_layout.addWidget(self.btn_start)
+
+        self.btn_stop = QPushButton("⛔ Parar Macro")
+        self.btn_stop.clicked.connect(self.parar_macro)
+        self.btn_stop.setEnabled(False)
+
+        control_layout.addWidget(self.btn_start)
+        control_layout.addWidget(self.btn_stop)
+
+        main_layout.addLayout(control_layout)
 
         # ---- Status ----
         self.status = QLabel("")
@@ -119,7 +132,7 @@ class OverLordApp(QWidget):
         else:
             QMessageBox.warning(self, "Erro", "Digite uma condição válida.")
 
-    def remover_condicao(self, item: QListWidgetItem):
+    def remover_condicao(self, item):
         index = self.lista_condicoes.row(item)
         self.lista_condicoes.takeItem(index)
         if index < len(self.condicoes_lista):
@@ -163,7 +176,7 @@ class OverLordApp(QWidget):
 
         self.show()
 
-    # ================== Função Principal ==================
+    # ================== Funções do Macro ==================
 
     def iniciar_macro(self):
         if not self.coordenadas_regiao:
@@ -178,38 +191,64 @@ class OverLordApp(QWidget):
             QMessageBox.warning(self, "Erro", "Selecione o botão REPRODUZIR.")
             return
 
-        preview = self.preview_checkbox.isChecked()
-        contador = 0
-
+        self.stop_macro = False
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
         self.status.setText("🟡 Macro rodando...")
 
-        while True:
+        self.thread_macro = threading.Thread(target=self.executar_macro)
+        self.thread_macro.start()
+
+    def parar_macro(self):
+        self.stop_macro = True
+        self.status.setText("⛔ Macro parado.")
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+
+    def executar_macro(self):
+        contador = 0
+        preview = self.preview_checkbox.isChecked()
+
+        while not self.stop_macro:
             imagem = ImageGrab.grab(bbox=self.coordenadas_regiao)
-            texto = pytesseract.image_to_string(imagem, lang='eng')
+            imagem = self.preprocessar_imagem(imagem)
 
-            print(f"[{contador}] Texto extraído:\n{texto}\n")
+            texto = pytesseract.image_to_string(imagem, lang='eng').strip()
+            print(f"[{contador}] Texto OCR:\n{texto}\n")
 
-            encontrada = any(palavra in texto for _, palavra in self.condicoes_lista)
+            ocorrencias = Counter()
 
-            if encontrada:
-                print("✅ Condição encontrada! Macro pausada.")
-                self.status.setText("✅ Condição encontrada!")
+            for _, palavra in self.condicoes_lista:
+                ocorrencias[palavra] = texto.count(palavra)
+
+            encontrou = True
+            for qtd, palavra in self.condicoes_lista:
+                if ocorrencias[palavra] < qtd:
+                    encontrou = False
+                    break
+
+            if encontrou:
+                self.status.setText("✅ Condição encontrada! Macro parado.")
+                print("✅ Condição encontrada! Parando macro.")
                 break
 
             if preview:
+                self.status.setText("🔍 Preview executado. Macro parado.")
                 print("🔍 Preview ativado. Parando após OCR.")
-                self.status.setText("🔍 Preview executado.")
                 break
 
-            print("🔄 Reproduzindo novamente...")
             pyautogui.moveTo(self.botao_reproduzir)
             pyautogui.click()
-
             time.sleep(self.tempo_entre_reproducoes)
             contador += 1
 
-        print("✅ Macro finalizada.")
-        self.status.setText("✅ Macro finalizada.")
+        self.parar_macro()
+
+    def preprocessar_imagem(self, imagem):
+        imagem = imagem.convert("L")  # Grayscale
+        imagem = ImageOps.autocontrast(imagem)
+        imagem = imagem.point(lambda x: 0 if x < 128 else 255, '1')  # Binarização
+        return imagem
 
 
 # ================== Classe para Seleção de Região ou Botões ==================
